@@ -1,0 +1,20 @@
+{
+  "name": "insightmate-app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test",
+    "test:ollama": "node insightmate-evaluation.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "exceljs": "4.4.0",
+    "express": "^5.2.1",
+    "multer": "^2.4.0",
+    "xlsx": "^0.18.5"
+  }
+}

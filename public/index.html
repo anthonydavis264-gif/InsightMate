@@ -1,0 +1,522 @@
+﻿
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+
+    <title>InsightMate — AI Data Analyst</title>
+
+    <link rel="stylesheet" href="/styles.css" />
+
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+
+  <body>
+    <header class="topbar">
+      <div class="container topbar-inner">
+        <div>
+          <div class="brand">InsightMate</div>
+
+          <div class="tagline">
+            Ask your data. Get clear answers.
+          </div>
+        </div>
+
+        <div class="status">
+          <span class="status-dot"></span>
+          Local AI
+        </div>
+      </div>
+    </header>
+
+    <main class="container">
+
+      <!-- HERO -->
+      <section class="hero">
+        <h1>
+          Turn your data into clear insights.
+        </h1>
+
+        <p>
+          Upload an Excel or CSV file, ask questions
+          in plain English, and let InsightMate
+          analyze your data.
+        </p>
+      </section>
+
+
+      <!-- UPLOAD -->
+      <section class="card upload-card">
+        <h2>Upload your data</h2>
+
+        <p>
+          Supported formats: Excel (.xlsx, .xls)
+          and CSV (.csv)
+        </p>
+
+        <div class="upload-area">
+          <input
+            type="file"
+            id="fileInput"
+            accept=".xlsx,.xls,.csv"
+          />
+
+          <button
+            id="uploadButton"
+            class="primary-button"
+          >
+            Upload Dataset
+          </button>
+        </div>
+
+        <div
+          id="uploadStatus"
+          class="upload-status"
+        ></div>
+      </section>
+
+
+      <!-- DATASET OVERVIEW -->
+      <section
+        id="overviewSection"
+        class="card"
+      >
+        <div class="section-heading">
+
+          <h2>
+            Dataset Overview
+          </h2>
+
+          <p id="fileName"></p>
+
+          <p id="sheetName"></p>
+
+        </div>
+
+        <div class="stats-grid">
+
+          <div class="stat-card">
+            <span class="stat-label">
+              Rows
+            </span>
+
+            <strong id="rowCount">
+              —
+            </strong>
+          </div>
+
+
+          <div class="stat-card">
+            <span class="stat-label">
+              Columns
+            </span>
+
+            <strong id="columnCount">
+              —
+            </strong>
+          </div>
+
+
+          <div class="stat-card">
+            <span class="stat-label">
+              Missing Values
+            </span>
+
+            <strong id="missingCount">
+              —
+            </strong>
+          </div>
+
+
+          <div class="stat-card">
+            <span class="stat-label">
+              Duplicate Rows
+            </span>
+
+            <strong id="duplicateCount">
+              —
+            </strong>
+          </div>
+
+        </div>
+      </section>
+
+
+      <!-- DATA QUALITY -->
+      <section
+        id="qualitySection"
+        class="card"
+      >
+        <div class="section-heading">
+
+          <h2>
+            Data Quality
+          </h2>
+
+          <p id="qualitySummary">
+            Dataset quality information
+          </p>
+
+        </div>
+
+        <div id="qualityContent"></div>
+
+      </section>
+
+
+<!-- DATA CLEANING & EXPORT -->
+<section id="cleaningSection" class="panel hidden">
+  <div class="section-heading">
+    <div>
+      <h2>Data Cleaning &amp; Export</h2>
+      <p>Choose the changes you want to make, preview them, and export a cleaned copy.</p>
+    </div>
+  </div>
+
+  <div class="cleaning-note">
+    Your original uploaded dataset will remain unchanged. Review the preview before exporting.
+  </div>
+
+  <div class="cleaning-suggestions">
+    <label class="suggestion-card cleaning-option">
+      <span class="suggestion-top">
+        <strong>Trim extra spaces</strong>
+        <input type="checkbox" id="trimWhitespace" checked />
+      </span>
+      <p>Remove leading and trailing spaces from text cells.</p>
+    </label>
+
+    <label class="suggestion-card cleaning-option">
+      <span class="suggestion-top">
+        <strong>Remove empty rows</strong>
+        <input type="checkbox" id="removeEmptyRows" />
+      </span>
+      <p>Remove rows where every column is empty.</p>
+    </label>
+
+    <div class="suggestion-card cleaning-option">
+      <span class="suggestion-top">
+        <strong>Remove duplicate rows automatically</strong>
+      </span>
+      <p>Keep the first occurrence and remove subsequent matching rows. This is always applied using safe text normalization.</p>
+    </div>
+  </div>
+
+
+<div class="cleaning-controls">
+  <button type="button" id="previewCleaningButton">
+    Preview Changes
+  </button>
+
+  <button type="button" id="exportCleanedButton" disabled>
+    Download Cleaned Excel
+  </button>
+</div>
+
+
+  <p id="cleaningStatus" role="status" aria-live="polite"></p>
+
+  <div id="cleaningSummary" class="cleaning-summary hidden"></div>
+
+  <div id="cleaningPreview" class="cleaning-preview hidden">
+    <h3>Cleaned Data Preview</h3>
+    <p id="cleaningPreviewCount"></p>
+    <div id="cleaningPreviewContent"></div>
+  </div>
+</section>
+
+<section id="excelCleaningSection" class="card hidden" aria-labelledby="excelCleaningTitle">
+  <div class="section-heading">
+    <div>
+      <h2 id="excelCleaningTitle">Clean &amp; Format Excel</h2>
+      <p>Create a cleaned copy of every worksheet. Duplicate rows are removed automatically when safe; your uploaded workbook stays unchanged.</p>
+    </div>
+  </div>
+
+  <p id="excelCleaningStatus" class="excel-cleaning-status" role="status" aria-live="polite">
+    Choose Clean &amp; Format to review the cleaning summary. Duplicate rows are removed automatically when safe.
+  </p>
+
+  <div class="cleaning-controls">
+    <button type="button" id="cleanExcelButton" class="primary-button">Clean &amp; Format</button>
+  </div>
+
+  <div id="excelCleaningSummary" class="excel-cleaning-summary hidden"></div>
+  <div class="cleaning-controls">
+    <button type="button" id="generateExcelButton" class="secondary-button" disabled>
+      Create Cleaned Workbook
+    </button>
+    <button type="button" id="downloadExcelButton" class="primary-button" disabled hidden>
+      Download Cleaned Excel
+    </button>
+  </div>
+</section>
+
+      <!-- DATA PREVIEW -->
+      <section
+        id="previewSection"
+        class="card"
+      >
+        <div class="section-heading">
+
+          <h2>
+            Dataset Preview
+          </h2>
+
+          <p id="previewCount"></p>
+
+        </div>
+
+        <div id="previewContent"></div>
+
+      </section>
+
+
+      <!-- QUESTION -->
+      <section
+        id="questionSection"
+        class="card"
+      >
+        <div class="section-heading">
+
+          <h2>
+            Ask your data
+          </h2>
+
+          <p>
+            Ask a question using normal language.
+          </p>
+
+        </div>
+
+        <div class="question-area">
+
+          <textarea
+            id="questionInput"
+            rows="3"
+            placeholder="Example: Which segment generated the highest total amount?"
+          ></textarea>
+
+          <button
+            id="askButton"
+            class="primary-button"
+          >
+            Ask InsightMate
+          </button>
+
+        </div>
+
+        <div id="questionStatus"></div>
+
+      </section>
+
+
+      <!-- RESULTS -->
+      <section
+        id="resultSection"
+        class="card"
+      >
+
+        <div class="section-heading">
+
+          <h2>
+            Results
+          </h2>
+
+        </div>
+
+
+        <!-- ANALYSIS RESULT -->
+        <div id="resultContent"></div>
+
+
+        <!-- CHART -->
+        <div
+          id="chartSection"
+          class="chart-section"
+          style="display: none;"
+        >
+
+          <div class="section-heading">
+
+            <h2>
+              Visualization
+            </h2>
+
+            <p>
+              A visual view of the calculated result.
+            </p>
+
+          </div>
+
+          <div id="chartContainer" class="chart-container">
+
+            <canvas
+              id="resultChart"
+            ></canvas>
+
+          </div>
+
+        </div>
+
+
+        <!-- BUSINESS INSIGHT -->
+        <div
+          id="insightSection"
+          class="business-insight"
+          style="display: none;"
+        >
+
+          <div class="section-heading">
+
+            <h2>
+              Business Insight
+            </h2>
+
+          </div>
+
+          <div id="businessInsight"></div>
+
+        </div>
+
+      </section>
+
+
+      <!-- FEATURES -->
+      <section class="features-section">
+
+        <div class="section-heading">
+
+          <h2>
+            What InsightMate can do
+          </h2>
+
+          <p>
+            Turn spreadsheets into useful business
+            information.
+          </p>
+
+        </div>
+
+
+        <div class="features-grid">
+
+          <div class="feature-card">
+
+            <h3>
+              📁 Upload
+            </h3>
+
+            <p>
+              Work with Excel and CSV datasets.
+            </p>
+
+          </div>
+
+
+          <div class="feature-card">
+
+            <h3>
+              🧹 Clean
+            </h3>
+
+            <p>
+              Detect missing values, duplicates,
+              inconsistent data and other quality
+              issues.
+            </p>
+
+          </div>
+
+
+          <div class="feature-card">
+
+            <h3>
+              💬 Ask
+            </h3>
+
+            <p>
+              Ask questions about your data using
+              everyday language.
+            </p>
+
+          </div>
+
+
+          <div class="feature-card">
+
+            <h3>
+              📊 Analyze
+            </h3>
+
+            <p>
+              Calculate totals, averages, counts
+              and grouped summaries from the actual
+              dataset.
+            </p>
+
+          </div>
+
+
+          <div class="feature-card">
+  <h3>
+    📈 Visualize
+  </h3>
+            <p>
+              Turn analysis results into charts
+              that are easy to understand.
+            </p>
+
+          </div>
+
+
+          <div class="feature-card">
+
+            <h3>
+              💡 Insights
+            </h3>
+
+            <p>
+              Highlight useful business observations
+              from verified calculations.
+            </p>
+
+          </div>
+
+        </div>
+
+      </section>
+
+    </main>
+
+
+    <!-- FOOTER -->
+    <footer class="footer">
+
+      <div class="container">
+
+        <p>
+          InsightMate — Local AI Data Analyst
+        </p>
+
+        <p>
+          Built with Node.js, Express, Ollama
+          and Chart.js
+        </p>
+
+      </div>
+
+    </footer>
+
+
+    <!-- APPLICATION JAVASCRIPT -->
+    <script src="/app.js"></script>
+
+  </body>
+</html>
