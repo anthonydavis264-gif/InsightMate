@@ -502,6 +502,37 @@ function repairAnalysisIntent(plan, question, columns) {
 
   const normalizedQuestion = normalizeText(question);
 
+  const requestsMissingValues =
+    /\b(missing values?|blank cells?|empty cells?)\b/.test(normalizedQuestion);
+  const requestsMissingRecords =
+    /\b(which|what)\s+(records?|rows?)\b/.test(normalizedQuestion) &&
+    requestsMissingValues;
+  const requestsColumnBreakdown =
+    /\b(each|every|per|by)\s+columns?\b/.test(normalizedQuestion);
+
+  if (requestsMissingRecords) {
+    repairedPlan.operation = "MISSING_RECORDS";
+    repairedPlan.filters = [];
+    repairedPlan.groupBy = null;
+    repairedPlan.metric = null;
+    repairedPlan.aggregation = null;
+    repairedPlan.sort = null;
+    repairedPlan.limit = null;
+
+    return repairedPlan;
+  }
+
+  if (requestsMissingValues && requestsColumnBreakdown) {
+    repairedPlan.operation = "MISSING_VALUES";
+    repairedPlan.groupBy = null;
+    repairedPlan.metric = null;
+    repairedPlan.aggregation = null;
+    repairedPlan.sort = null;
+    repairedPlan.limit = null;
+
+    return repairedPlan;
+  }
+
   const amountColumn = resolveColumnName("Amount", columns);
   const segmentColumn = resolveColumnName("Segment", columns);
   const shipModeColumn = resolveColumnName("Ship Mode", columns);
@@ -519,11 +550,26 @@ function repairAnalysisIntent(plan, question, columns) {
     normalizedQuestion.includes("each ship mode") ||
     normalizedQuestion.includes("ship mode has");
 
+  const explicitGroupByColumn = [...columns]
+    .sort(
+      (left, right) =>
+        normalizeText(right).length - normalizeText(left).length
+    )
+    .find((column) => {
+      const normalizedColumn = normalizeText(column);
+
+      return (
+        normalizedQuestion.includes(`by ${normalizedColumn}`) ||
+        normalizedQuestion.includes(`for each ${normalizedColumn}`) ||
+        normalizedQuestion.includes(`each ${normalizedColumn}`)
+      );
+    });
+
   const groupByColumn = isBySegmentQuestion
     ? segmentColumn
     : isByShipModeQuestion
       ? shipModeColumn
-      : null;
+      : explicitGroupByColumn || null;
 
   if (groupByColumn) {
     repairedPlan.operation = "GROUP_BY";
@@ -542,12 +588,22 @@ function repairAnalysisIntent(plan, question, columns) {
       return repairedPlan;
     }
 
-    // Amount-based grouping requires a usable metric column.
-    if (!amountColumn) {
+    const explicitMetricColumn = columns
+      .filter((column) =>
+        column !== groupByColumn &&
+        normalizedQuestion.includes(normalizeText(column))
+      )
+      .sort(
+        (left, right) =>
+          normalizeText(right).length - normalizeText(left).length
+      )[0];
+    const metricColumn = explicitMetricColumn || amountColumn;
+
+    if (!metricColumn) {
       return repairedPlan;
     }
 
-    repairedPlan.metric = amountColumn;
+    repairedPlan.metric = metricColumn;
 
     if (
       normalizedQuestion.includes("total") ||
@@ -654,7 +710,9 @@ function validateAnalysisPlan(plan, columns) {
   const validOperations = [
     "AGGREGATE",
     "COUNT",
-    "GROUP_BY"
+    "GROUP_BY",
+    "MISSING_VALUES",
+    "MISSING_RECORDS"
   ];
 
   const validAggregations = [
@@ -906,6 +964,40 @@ function executeCount(rows) {
   };
 }
 
+function executeMissingValues(rows, columns) {
+  const quality = buildDataQuality(rows, columns);
+
+  return {
+    type: "missing_values",
+    rows: columns.map((column) => ({
+      column,
+      missingCount: quality[column].missingCount
+    }))
+  };
+}
+
+function executeMissingRecords(rows, columns) {
+  const missingRecords = [];
+
+  rows.forEach((row, index) => {
+    const blankColumns = columns.filter((column) =>
+      isEmptyValue(row[column])
+    );
+
+    if (blankColumns.length > 0) {
+      missingRecords.push({
+        recordOrdinal: index + 1,
+        blankColumns
+      });
+    }
+  });
+
+  return {
+    type: "missing_records",
+    rows: missingRecords
+  };
+}
+
 /* ============================================================
    GROUP BY
    ============================================================ */
@@ -970,12 +1062,18 @@ function executeGroupBy(rows, plan) {
    EXECUTE ANALYSIS PLAN
    ============================================================ */
 
-function executeAnalysisPlan(rows, plan) {
+function executeAnalysisPlan(rows, plan, columns) {
   const filteredRows = applyFilters(rows, plan.filters);
 
   switch (plan.operation) {
     case "COUNT":
       return executeCount(filteredRows);
+
+    case "MISSING_VALUES":
+      return executeMissingValues(filteredRows, columns);
+
+    case "MISSING_RECORDS":
+      return executeMissingRecords(filteredRows, columns);
 
     case "AGGREGATE":
       return executeAggregate(filteredRows, plan);
@@ -1013,7 +1111,7 @@ ${JSON.stringify(columns, null, 2)}
 User question:
 "${question}"
 
-Allowed operations: COUNT, AGGREGATE, GROUP_BY.
+Allowed operations: COUNT, AGGREGATE, GROUP_BY, MISSING_VALUES, MISSING_RECORDS.
 Allowed aggregations: SUM, AVERAGE, MIN, MAX, COUNT.
 
 Use this JSON structure:
@@ -1046,8 +1144,10 @@ Rules:
 16. Grouping questions asking "how many" or "count" use GROUP_BY with aggregation COUNT.
 17. "How many orders are there by Ship Mode?" means GROUP_BY Ship Mode, aggregation COUNT.
 18. GROUP_BY must return all groups with limit = 0.
-19. Use only column names from the available columns.
-20. Do not include explanations outside the JSON.
+19. Questions asking for missing values or blank cells for each column mean MISSING_VALUES.
+20. Questions asking which records or rows have missing values mean MISSING_RECORDS.
+21. Use only column names from the available columns.
+22. Do not include explanations outside the JSON.
 `;
 
   const response = await callOllama(prompt);
@@ -1247,8 +1347,11 @@ app.post(
         );
       }
 
-      const rawHeaders = matrix[0] || [];
-      const dataRows = matrix.slice(1);
+      const headerRowIndex = matrix.findIndex((cells) =>
+        cells.some((value) => !isEmptyValue(value))
+      );
+      const rawHeaders = matrix[headerRowIndex] || [];
+      const dataRows = matrix.slice(headerRowIndex + 1);
 
       const columnDefinitions = [];
       const usedNames = new Set();
@@ -1790,7 +1893,8 @@ app.post(
 
       const result = executeAnalysisPlan(
         currentDataset.rows,
-        normalizedPlan
+        normalizedPlan,
+        currentDataset.columns
       );
 
       return res.json({

@@ -24,6 +24,8 @@ let appProcess;
 let appOutput = "";
 let csvFile;
 let xlsxFile;
+let offsetHeaderXlsxFile;
+let missingRecordsXlsxFile;
 let uploadDirectory;
 
 async function getAvailablePort() {
@@ -263,6 +265,65 @@ before(async () => {
   xlsxFile = path.join(tempRoot, "synthetic.xlsx");
   XLSX.writeFile(workbook, xlsxFile);
 
+  const headers = [
+    "Date",
+    "Client",
+    "Contact",
+    "Department",
+    "Payment",
+    "Revenue",
+    "Profit",
+    "Profit Margin"
+  ];
+  const records = Array.from({ length: 31 }, (_, index) => {
+    const recordNumber = index + 1;
+    return [
+      "",
+      `2023-05-${String(recordNumber).padStart(2, "0")}`,
+      `Client ${recordNumber}`,
+      `Contact ${recordNumber}`,
+      recordNumber === 31
+        ? "Final Department"
+        : recordNumber % 2 === 1
+          ? "North"
+          : "South",
+      recordNumber === 31
+        ? "Final Payment"
+        : recordNumber % 2 === 1
+          ? "Card"
+          : "Cash",
+      recordNumber * 10,
+      recordNumber,
+      0.1
+    ];
+  });
+  const offsetHeaderWorkbook = XLSX.utils.book_new();
+  const offsetHeaderSheet = XLSX.utils.aoa_to_sheet([
+    [],
+    ["", ...headers],
+    ...records
+  ]);
+  offsetHeaderSheet["!ref"] = "A1:I33";
+  XLSX.utils.book_append_sheet(
+    offsetHeaderWorkbook,
+    offsetHeaderSheet,
+    "data"
+  );
+  offsetHeaderXlsxFile = path.join(tempRoot, "offset-header.xlsx");
+  XLSX.writeFile(offsetHeaderWorkbook, offsetHeaderXlsxFile);
+
+  const missingRecordsWorkbook = XLSX.utils.book_new();
+  const missingRecordsSheet = XLSX.utils.aoa_to_sheet([
+    ["Client", "Contact", "Payment", "Revenue", "Profit Margin"],
+    ["Alpha", "555-0101", "Card", 10, 0.1],
+    ["Beta", "555-0102", "", 20, 0.2],
+    ["Gamma", "555-0103", "Cash", "", ""],
+    ["Delta", "555-0104", "", 40, 0.4]
+  ]);
+  XLSX.utils.book_append_sheet(missingRecordsWorkbook, missingRecordsSheet, "data");
+  missingRecordsXlsxFile = path.join(tempRoot, "missing-records.xlsx");
+  XLSX.writeFile(missingRecordsWorkbook, missingRecordsXlsxFile);
+
   appProcess = spawn(process.execPath, ["server.mjs"], {
     cwd: projectRoot,
     env: {
@@ -418,6 +479,69 @@ test("analysis route returns deterministic aggregate, group, and count shapes", 
   assert.equal(count.result.value, 5);
 });
 
+test("missing-value questions return one missing count per column without changing record counts", async () => {
+  const uploadResponse = await uploadFile(csvFile, "synthetic.csv", "text/csv");
+  assert.equal(uploadResponse.status, 200);
+
+  const questions = [
+    "How many missing values are there in each column?",
+    "For each column, count the blank cells and show the column name and missing-value count in a table."
+  ];
+
+  for (const question of questions) {
+    const response = await postJson("/api/analyze-question", { question });
+    const data = await response.json();
+
+    assert.equal(response.status, 200, question);
+    assert.equal(data.analysisPlan.operation, "MISSING_VALUES");
+    assert.equal(data.result.type, "missing_values");
+    assert.equal(data.result.rows.length, 3);
+    assert.deepEqual(data.result.rows, [
+      { column: "Category", missingCount: 2 },
+      { column: "Amount", missingCount: 1 },
+      { column: "Note", missingCount: 3 }
+    ]);
+  }
+
+  const countResponse = await postJson("/api/analyze-question", {
+    question: "How many orders are there?"
+  });
+  const count = await countResponse.json();
+
+  assert.equal(countResponse.status, 200);
+  assert.equal(count.analysisPlan.operation, "COUNT");
+  assert.equal(count.result.type, "count");
+  assert.equal(count.result.value, 5);
+});
+
+test("missing-record question returns affected record ordinals and blank column names only", async () => {
+  const uploadResponse = await uploadFile(
+    missingRecordsXlsxFile,
+    "missing-records.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  assert.equal(uploadResponse.status, 200);
+
+  const response = await postJson("/api/analyze-question", {
+    question: "Which records have missing values, and which columns are blank?"
+  });
+  const data = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(data.analysisPlan.operation, "MISSING_RECORDS");
+  assert.equal(data.result.type, "missing_records");
+  assert.deepEqual(data.result.rows, [
+    { recordOrdinal: 2, blankColumns: ["Payment"] },
+    { recordOrdinal: 3, blankColumns: ["Revenue", "Profit Margin"] },
+    { recordOrdinal: 4, blankColumns: ["Payment"] }
+  ]);
+  assert.ok(data.result.rows.every((row) =>
+    Object.keys(row).sort().join(",") === "blankColumns,recordOrdinal"
+  ));
+  assert.equal(JSON.stringify(data.result).includes("555-010"), false);
+  assert.equal(JSON.stringify(data.result).includes("Alpha"), false);
+});
+
 test("XLSX upload normalizes duplicate headers and retains numeric and missing values", async () => {
   const response = await uploadFile(
     xlsxFile,
@@ -435,6 +559,109 @@ test("XLSX upload normalizes duplicate headers and retains numeric and missing v
   assert.equal(data.preview[1].Amount, "");
   assert.equal(data.preview[1]["Amount (2)"], 6);
   assert.deepEqual(await fs.readdir(uploadDirectory), []);
+});
+
+test("XLSX upload skips leading blank rows and preserves offset header indexes for analysis", async () => {
+  const response = await uploadFile(
+    offsetHeaderXlsxFile,
+    "offset-header.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  const data = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(data.columnNames, [
+    "Date",
+    "Client",
+    "Contact",
+    "Department",
+    "Payment",
+    "Revenue",
+    "Profit",
+    "Profit Margin"
+  ]);
+  assert.equal(data.rows, 31);
+  assert.deepEqual(
+    {
+      Date: data.preview[0].Date,
+      Client: data.preview[0].Client,
+      Contact: data.preview[0].Contact,
+      Department: data.preview[0].Department,
+      Payment: data.preview[0].Payment,
+      Revenue: data.preview[0].Revenue,
+      Profit: data.preview[0].Profit,
+      "Profit Margin": data.preview[0]["Profit Margin"]
+    },
+    {
+      Date: "2023-05-01",
+      Client: "Client 1",
+      Contact: "Contact 1",
+      Department: "North",
+      Payment: "Card",
+      Revenue: 10,
+      Profit: 1,
+      "Profit Margin": 0.1
+    }
+  );
+  const analysisResponse = await postJson("/api/analyze-question", {
+    question: "What is the total revenue by department?"
+  });
+  const analysis = await analysisResponse.json();
+
+  assert.equal(analysisResponse.status, 200);
+  assert.deepEqual(
+    {
+      operation: analysis.analysisPlan.operation,
+      groupBy: analysis.analysisPlan.groupBy,
+      metric: analysis.analysisPlan.metric,
+      aggregation: analysis.analysisPlan.aggregation
+    },
+    {
+      operation: "GROUP_BY",
+      groupBy: "Department",
+      metric: "Revenue",
+      aggregation: "SUM"
+    }
+  );
+  assert.deepEqual(analysis.result.rows, [
+    { group: "South", value: 2400 },
+    { group: "North", value: 2250 },
+    { group: "Final Department", value: 310 }
+  ]);
+
+  const lastRecordChecks = [
+    ["What is the total revenue by date?", "Revenue", "2023-05-31", 310],
+    ["What is the total revenue by client?", "Revenue", "Client 31", 310],
+    ["What is the total revenue by contact?", "Revenue", "Contact 31", 310],
+    ["What is the total revenue by payment?", "Revenue", "Final Payment", 310],
+    ["What is the total profit by department?", "Profit", "Final Department", 31],
+    [
+      "What is the total profit margin by department?",
+      "Profit Margin",
+      "Final Department",
+      0.1
+    ]
+  ];
+
+  for (const [question, metric, group, value] of lastRecordChecks) {
+    const lastRecordResponse = await postJson("/api/analyze-question", {
+      question
+    });
+    const lastRecordAnalysis = await lastRecordResponse.json();
+
+    assert.equal(lastRecordResponse.status, 200, question);
+    assert.equal(lastRecordAnalysis.analysisPlan.metric, metric);
+    assert.ok(lastRecordAnalysis.result.rows.some((row) =>
+      row.group === group && row.value === value
+    ), question);
+  }
+
+  const restoreResponse = await uploadFile(
+    xlsxFile,
+    "synthetic.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  assert.equal(restoreResponse.status, 200);
 });
 
 test("Excel cleaning is upload-bound, removes duplicates automatically, and downloads only the cleaned result", async () => {
