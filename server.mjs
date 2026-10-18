@@ -44,6 +44,7 @@ let currentDataset = {
   rows: [],
   columns: []
 };
+let currentAnalysisWorksheets = new Map();
 let currentWorkbookState = null;
 let currentUploadVersionId = null;
 let currentCleaningAccessToken = null;
@@ -1289,6 +1290,119 @@ app.get("/api/dataset", (req, res) => {
    UPLOAD
    ============================================================ */
 
+function parseAdditionalAnalysisWorksheet(fileName, sheetName, worksheet) {
+  const matrix = XLSX.utils.sheet_to_json(worksheet, {
+    header: 1,
+    defval: "",
+    raw: true,
+    blankrows: true
+  });
+
+  if (!matrix.length) {
+    throw new Error("The worksheet is empty.");
+  }
+
+  const headerRowIndex = matrix.findIndex((cells) =>
+    cells.some((value) => !isEmptyValue(value))
+  );
+
+  if (headerRowIndex < 0) {
+    throw new Error("The worksheet has no usable header row.");
+  }
+
+  const rawHeaders = matrix[headerRowIndex] || [];
+  const dataRows = matrix.slice(headerRowIndex + 1);
+  const columnDefinitions = [];
+  const usedNames = new Set();
+
+  for (let index = 0; index < rawHeaders.length; index++) {
+    const rawHeader = String(rawHeaders[index] ?? "").trim();
+
+    const columnHasData = dataRows.some((cells) =>
+      !isEmptyValue(cells[index])
+    );
+
+    if (!rawHeader && !columnHasData) {
+      continue;
+    }
+
+    const baseName = rawHeader || `Column ${index + 1}`;
+    let columnName = baseName;
+    let suffix = 2;
+
+    while (usedNames.has(normalizeText(columnName))) {
+      columnName = `${baseName} (${suffix})`;
+      suffix++;
+    }
+
+    usedNames.add(normalizeText(columnName));
+    columnDefinitions.push({ index, name: columnName });
+  }
+
+  const columns = columnDefinitions.map((column) => column.name);
+
+  if (!columns.length) {
+    throw new Error("No usable column headers or data columns were found.");
+  }
+
+  const rawRows = dataRows.map((cells) => {
+    const row = {};
+
+    for (const column of columnDefinitions) {
+      row[column.name] = cells[column.index] ?? "";
+    }
+
+    return row;
+  });
+
+  const rows = rawRows.filter(
+    (row) => !isRepeatedHeaderRow(row, columns)
+  );
+
+  return {
+    fileName,
+    sheetName,
+    rows,
+    columns
+  };
+}
+
+function extractRequestedWorksheetName(question, worksheetNames) {
+  for (const sheetName of worksheetNames) {
+    const escapedName = sheetName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const quotedOrBareName =
+      `(?:["'“]${escapedName}["'”]|${escapedName}(?=$|[?!,.;]|\\s+(?:and|for|with|by|where|using|that|to)\\b))`;
+    const beforeWorksheet = new RegExp(
+      `\\b(?:worksheet|sheet)\\s+(?:named\\s+)?${quotedOrBareName}`,
+      "i"
+    );
+    const afterWorksheet = new RegExp(
+      `\\b(?:in|on|from|for)\\s+(?:the\\s+)?${quotedOrBareName}\\s+\\b(?:worksheet|sheet)\\b`,
+      "i"
+    );
+
+    if (beforeWorksheet.test(question) || afterWorksheet.test(question)) {
+      return sheetName;
+    }
+  }
+
+  const explicitWorksheetName =
+    /\b(?:worksheet|sheet)\s+(?:named\s+)?(?:"([^"]+)"|'([^']+)'|([A-Z0-9_][\w .-]*?))(?=\s+(?:and|for|with|by|where|using|that|to)\b|[?!,.;]|$)/i.exec(question);
+  const nameBeforeWorksheet =
+    /["'“]([^"'”]+)["'”]\s+\b(?:worksheet|sheet)\b/i.exec(question);
+  const bareNameBeforeWorksheet =
+    /\b(?:in|on|from)\s+(?:the\s+)?([A-Z0-9_][\w .-]*?)\s+\b(?:worksheet|sheet)\b/i.exec(question);
+
+  return (
+    explicitWorksheetName?.[1] ||
+    explicitWorksheetName?.[2] ||
+    explicitWorksheetName?.[3]?.trim() ||
+    nameBeforeWorksheet?.[1]?.trim() ||
+    bareNameBeforeWorksheet?.[1]?.trim() ||
+    null
+  );
+}
+
 app.post(
   "/api/upload",
   markUploadSequence,
@@ -1320,6 +1434,33 @@ app.post(
         throw new Error(
           "The uploaded workbook contains no sheets."
         );
+      }
+
+      const nextAnalysisWorksheets = new Map();
+      if (workbookState) {
+        for (const additionalSheetName of workbook.SheetNames.slice(1)) {
+          try {
+            nextAnalysisWorksheets.set(
+              normalizeText(additionalSheetName),
+              {
+                sheetName: additionalSheetName,
+                dataset: parseAdditionalAnalysisWorksheet(
+                  req.file.originalname,
+                  additionalSheetName,
+                  workbook.Sheets[additionalSheetName]
+                )
+              }
+            );
+          } catch (error) {
+            nextAnalysisWorksheets.set(
+              normalizeText(additionalSheetName),
+              {
+                sheetName: additionalSheetName,
+                error: error.message
+              }
+            );
+          }
+        }
       }
 
       // Keep the existing first-worksheet behavior.
@@ -1441,6 +1582,7 @@ app.post(
 
       // Commit both representations only after parsing and profiling succeed.
       currentDataset = nextDataset;
+      currentAnalysisWorksheets = nextAnalysisWorksheets;
       currentWorkbookState = workbookState;
       currentUploadVersionId =
         workbookState?.uploadVersionId || randomUUID();
@@ -1859,9 +2001,45 @@ app.post(
         });
       }
 
+      const worksheetNames = [
+        ...(currentDataset.sheetName ? [currentDataset.sheetName] : []),
+        ...Array.from(
+          currentAnalysisWorksheets.values(),
+          (worksheet) => worksheet.sheetName
+        )
+      ];
+      const requestedWorksheetName = extractRequestedWorksheetName(
+        question,
+        worksheetNames
+      );
+      let analysisDataset = currentDataset;
+
+      if (requestedWorksheetName) {
+        const requestedKey = normalizeText(requestedWorksheetName);
+        if (!currentWorkbookState || !worksheetNames.some(
+          (sheetName) => normalizeText(sheetName) === requestedKey
+        )) {
+          return res.status(400).json({
+            success: false,
+            error: `The uploaded dataset does not contain a worksheet named "${requestedWorksheetName}".`
+          });
+        }
+
+        if (requestedKey !== normalizeText(currentDataset.sheetName)) {
+          const worksheet = currentAnalysisWorksheets.get(requestedKey);
+          if (worksheet?.error) {
+            return res.status(400).json({
+              success: false,
+              error: `Worksheet "${worksheet.sheetName}" cannot be analyzed: ${worksheet.error}`
+            });
+          }
+          analysisDataset = worksheet.dataset;
+        }
+      }
+
       const profile = buildDatasetProfile(
-        currentDataset.rows,
-        currentDataset.columns
+        analysisDataset.rows,
+        analysisDataset.columns
       );
 
       const aiPlan = await createAnalysisPlan(
@@ -1872,29 +2050,29 @@ app.post(
       let repairedPlan = repairFilterPlanFromQuestion(
         aiPlan,
         question,
-        currentDataset.columns
+        analysisDataset.columns
       );
 
       repairedPlan = repairAnalysisIntent(
         repairedPlan,
         question,
-        currentDataset.columns
+        analysisDataset.columns
       );
 
       const normalizedPlan = normalizeAnalysisPlan(
         repairedPlan,
-        currentDataset.columns
+        analysisDataset.columns
       );
 
       validateAnalysisPlan(
         normalizedPlan,
-        currentDataset.columns
+        analysisDataset.columns
       );
 
       const result = executeAnalysisPlan(
-        currentDataset.rows,
+        analysisDataset.rows,
         normalizedPlan,
-        currentDataset.columns
+        analysisDataset.columns
       );
 
       return res.json({

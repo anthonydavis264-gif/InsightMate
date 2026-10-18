@@ -24,6 +24,7 @@ let appProcess;
 let appOutput = "";
 let csvFile;
 let xlsxFile;
+let multiWorksheetXlsxFile;
 let offsetHeaderXlsxFile;
 let missingRecordsXlsxFile;
 let uploadDirectory;
@@ -264,6 +265,31 @@ before(async () => {
   XLSX.utils.book_append_sheet(workbook, sheet, "Synthetic");
   xlsxFile = path.join(tempRoot, "synthetic.xlsx");
   XLSX.writeFile(workbook, xlsxFile);
+
+  const multiWorksheetWorkbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    multiWorksheetWorkbook,
+    XLSX.utils.aoa_to_sheet([
+      ["Amount"],
+      [10],
+      [20]
+    ]),
+    "Primary"
+  );
+  XLSX.utils.book_append_sheet(
+    multiWorksheetWorkbook,
+    XLSX.utils.aoa_to_sheet([
+      ["Amount"],
+      [40],
+      [60]
+    ]),
+    "Alternate Data"
+  );
+  multiWorksheetXlsxFile = path.join(
+    tempRoot,
+    "multi-worksheet.xlsx"
+  );
+  XLSX.writeFile(multiWorksheetWorkbook, multiWorksheetXlsxFile);
 
   const headers = [
     "Date",
@@ -961,6 +987,69 @@ test("analysis calculations use the uploaded XLSX dataset", async () => {
   assert.equal(data.result.type, "aggregate");
   assert.equal(data.result.metric, "Amount");
   assert.equal(data.result.value, 3);
+});
+
+test("analysis uses a named worksheet without changing the dashboard dataset", async () => {
+  const uploadResponse = await uploadFile(
+    multiWorksheetXlsxFile,
+    "multi-worksheet.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  assert.equal(uploadResponse.status, 200);
+
+  const response = await postJson("/api/analyze-question", {
+    question: 'What is the total Amount in the "Alternate Data" worksheet?'
+  });
+  const data = await response.json();
+  const datasetResponse = await fetch(`${appBaseUrl}/api/dataset`);
+  const dataset = await datasetResponse.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(data.result.value, 100);
+  assert.equal(dataset.sheetName, "Primary");
+  assert.deepEqual(dataset.columnNames, ["Amount"]);
+});
+
+test("analysis defaults to the first worksheet when none is named", async () => {
+  const uploadResponse = await uploadFile(
+    multiWorksheetXlsxFile,
+    "multi-worksheet.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  assert.equal(uploadResponse.status, 200);
+
+  const response = await postJson("/api/analyze-question", {
+    question: "What is the total Amount?"
+  });
+  const data = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(data.result.value, 30);
+});
+
+test("analysis rejects a requested worksheet that does not exist", async () => {
+  const uploadResponse = await uploadFile(
+    multiWorksheetXlsxFile,
+    "multi-worksheet.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  assert.equal(uploadResponse.status, 200);
+
+  const response = await postJson("/api/analyze-question", {
+    question: "What is the total Amount in Missing Data worksheet?"
+  });
+  const data = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(data.success, false);
+  assert.match(data.error, /does not contain a worksheet named "Missing Data"/i);
+
+  const restoreUpload = await uploadFile(
+    xlsxFile,
+    "synthetic.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  );
+  assert.equal(restoreUpload.status, 200);
 });
 
 test("invalid workbook returns a meaningful error and leaves active data intact", async () => {
